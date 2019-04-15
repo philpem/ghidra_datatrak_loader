@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package sega;
+package datatrak;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -37,6 +37,8 @@ import ghidra.program.model.data.DWordDataType;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataUtilities;
 import ghidra.program.model.data.DataUtilities.ClearDataMode;
+import ghidra.program.model.data.Structure;
+import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.WordDataType;
 import ghidra.program.model.lang.LanguageCompilerSpecPair;
 import ghidra.program.model.listing.Program;
@@ -52,25 +54,27 @@ import ghidra.util.task.TaskMonitor;
 /**
  * TODO: Provide class-level documentation that describes what this loader does.
  */
-public class SegaLoader extends AbstractLibrarySupportLoader {
+public class DatatrakLoader extends AbstractLibrarySupportLoader {
 
-	private VectorsTable vectors;
-	private GameHeader header;
+	private VectorTable vectors;
 
 	@Override
 	public String getName() {
-		return "Sega Mega Drive / Genesis Loader";
+		return "Datatrak M68000 firmware";
 	}
 
 	@Override
 	public Collection<LoadSpec> findSupportedLoadSpecs(ByteProvider provider) throws IOException {
 		List<LoadSpec> loadSpecs = new ArrayList<>();
+		
+		
+		// FIXME Disabled because the Datatrak ROMs don't have any fixed data we can use to identify them
+		
+		//BinaryReader reader = new BinaryReader(provider, false);
 
-		BinaryReader reader = new BinaryReader(provider, false);
-
-		if (reader.readAsciiString(0x100, 4).equals(new String("SEGA"))) {
+		//if (reader.readAsciiString(0x100, 4).equals(new String("SEGA"))) {
 			loadSpecs.add(new LoadSpec(this, 0, new LanguageCompilerSpecPair("68000:BE:32:MC68020", "default"), true));
-		}
+		//}
 
 		return loadSpecs;
 	}
@@ -84,13 +88,85 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 		BinaryReader reader = new BinaryReader(provider, false);
 		FlatProgramAPI fpa = new FlatProgramAPI(program, monitor);
 
-		vectors = new VectorsTable(fpa, reader);
-		header = new GameHeader(reader);
+		vectors = new VectorTable(fpa, reader);
+		//header = new GameHeader(reader);
 
 		createSegments(fpa, provider, program, monitor, log);
-		markVectorsTable(program, fpa, log);
-		markHeader(program, fpa, log);
+		markVectorTable(program, fpa, log);
+		//markHeader(program, fpa, log);
 
+		
+		// TODO: Find the Initialized Data block and set it up as a mirror segment
+		// TODO Scan from the RESET entry point to find the CRT0 (initialisation) code 
+
+		long initPC = vectors.getReset().getAddress().getOffset();
+		
+		// Pattern to match; -1 means the byte is not requ
+		int[] pattern = {
+				0x41, 0xF9, 0x00, 0x20, 0x00, 0x00,		// LEA    (0x200000).L, A0     ; start of dseg in RAM
+				0x20, 0x3C, 0x00, -1, -1, -1,			// MOVE.L #EndOfDataSeg, D0    ; end of dseg in RAM
+				0x90, 0x88,								// SUB.L  A0, D0               ; D0 = D0 - A0
+				0x43, 0xF9, 0x00, -1, -1, -1,			// LEA    (StartOfData), A1    ; start of dseg initialisation data
+				0x53, 0x80,								// SUBQ.L #1, D0               ; D0 --
+				0x10, 0xD9,								// MOVE.B (A1)+, (A0)+         ; *a0++ = *a1++
+				0x51, 0xC8, 0xFF, 0xFC					// DBF    D0, $-2              ; decrement d0, branch if >= 0
+		};
+		
+		// Sliding window buffer -- TODO prefill with data from initPC
+		ArrayList<Integer> window = new ArrayList<>();
+		for (int i=0; i<pattern.length; i++) {		// FIXME prefills with zeroes
+			window.add(0);
+		}
+		//reader.readByteArray(initPC, pattern.length);
+
+		Boolean match = true;
+		long matchAddress = 0;
+
+		log.appendMsg(String.format("SLIDE: Initial PC = %08X",  initPC));
+		
+		// Scan from the initial PC to a reasonable spot past it 
+		for (long addr=initPC; addr < initPC + 0x100; addr++) {
+			// Remove first byte (this is a sliding-window FIFO)
+			window.remove(0);
+			window.add((reader.readByte(addr)) & 0xFF);
+
+			// Check for a window match
+			match = true;
+			for (int i=0; i<pattern.length; i++) {
+				if ((pattern[i] != -1) && (pattern[i] != window.get(i))) {
+					match = false;
+					break;
+				}
+			}
+			
+			// Exit the loop if we found a match
+			if (match) {
+				matchAddress = addr - pattern.length + 1;
+				break;
+			}
+		}
+		
+		if (match) {
+			// Extract useful pointers from the IDATA copy code
+			long dsegRamStart = reader.readUnsignedInt(matchAddress+2);
+			long dsegRamEnd   = reader.readUnsignedInt(matchAddress+8);
+			long dsegRomStart = reader.readUnsignedInt(matchAddress+16);
+			
+			log.appendMsg(String.format("%s: Creating IDATA segment -- RAM 0x%06X to 0x%06X, copied from 0x%06X", getName(), dsegRamStart, dsegRamEnd, dsegRomStart));
+			
+			// Calculate IDATA segment length and ROM end address
+			long dsegLen = dsegRamEnd - dsegRamStart;
+			//long dsegRomEnd = dsegRomStart + dsegLen;
+			
+			createMirrorSegment(program.getMemory(), fpa, "IDATA", dsegRomStart, dsegRamStart, dsegLen, log);
+			createSegment(fpa, null, "RAM1", dsegRamEnd, 0x20000-dsegLen, true, true, true, false, log);		// TODO Validate RAM area addresses
+			createSegment(fpa, null, "RAM2", 0x220000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
+		} else {
+			log.appendMsg("Caution: IDATA segment initialiser not found -- IDATA segment data not copied!");
+			createSegment(fpa, null, "RAM1", 0x200000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
+			createSegment(fpa, null, "RAM2", 0x220000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
+		}
+		
 		monitor.setMessage(String.format("%s : Loading done", getName()));
 	}
 
@@ -98,9 +174,80 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 			MessageLog log) throws IOException {
 		InputStream romStream = provider.getInputStream(0);
 
-		createSegment(fpa, romStream, "ROM", 0x000000L, Math.min(romStream.available(), 0x3FFFFFL), true, false, true, false,
-				log);
+		// ROM
+		createSegment(fpa, romStream, "ROM", 0x000000L, Math.min(romStream.available(), 0x1FFFFFL),
+				true, false, true, false, log);
+				
+		
+		// RAM segments are created once IDATA is known
+		
+		
+		// Peripherals
+		createSegment(fpa, null, "IO_ADC",		0x240000, 256, true, true, false, true, log);	// ZN448 A-D converter
+		createNamedData(fpa, program, 0x240001L, "IO_ADC_ADC", ByteDataType.dataType, log);
+		fpa.setEOLComment( fpa.toAddr(0x240001L), "Read:  ADC result\nWrite: Start conversion");
+		
+		createSegment(fpa, null, "IO_UNK_01",	0x240100, 256, true, true, false, true, log);
+		
+		createSegment(fpa, null, "IO_RF_PHASE",	0x240200, 256, true, true, false, true, log);	// RF phase detector
+		
+		if (false) {
+			Structure rfPhase = new StructureDataType("RF_PHASE", 0);
+			rfPhase.add(ByteDataType.dataType, "HI", "RF Phase, high nibble (in LSB)");
+			rfPhase.add(ByteDataType.dataType, "LO", "RF Phase, low byte");
+			try {
+				DataUtilities.createData(program, fpa.toAddr(0x240200), rfPhase, -1, false,
+						ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+			} catch (CodeUnitInsertionException e) {
+				log.appendException(e);
+			}
+		} else {
+			createNamedData(fpa, program, 0x240200L, "IO_RF_PHASE_HI", ByteDataType.dataType, log);
+			fpa.setEOLComment( fpa.toAddr(0x240200L), "Read: RF phase high nibble (Msbyte indeterminate, Lsbyte highword)");
+			createNamedData(fpa, program, 0x240201L, "IO_RF_PHASE_LO", ByteDataType.dataType, log);
+			fpa.setEOLComment( fpa.toAddr(0x240201L), "Read: RF phase low nibble");
+		}
+		
+		createSegment(fpa, null, "IO_DUART",	0x240300, 256, true, true, false, true, log);	// SCC68692 Dual UART
+		Structure duart = new StructureDataType("DUART", 0);
+		duart.add(WordDataType.dataType, 2, "MR1A_MR2A",	"R/W: Mode register A (MR1A, MR2A)");
+		duart.add(WordDataType.dataType, 2, "SRA_CSRA",		"R: Status Reg A\nW:Clk Sel Reg A");
+		duart.add(WordDataType.dataType, 2, "BRGT_CRA",		"R: BRG test\nW:Cmd Reg A");
+		duart.add(WordDataType.dataType, 2, "RHRA_THRA",	"R: Rx Buf A\nW:Tx Buf A");
+		duart.add(WordDataType.dataType, 2, "IPCR_ACR",		"R: Input port change reg\nW: Aux control reg");
+		duart.add(WordDataType.dataType, 2, "ISR_IMR",		"R: Interrupt status reg\nW: Interrupt mask reg");
+		duart.add(WordDataType.dataType, 2, "CTU_CTUR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
+		duart.add(WordDataType.dataType, 2, "CTL_CTLR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
+		duart.add(WordDataType.dataType, 2, "MR1B_MR2B",	"R/W: Mode Register B (MR1B, MR2B)");
+		duart.add(WordDataType.dataType, 2, "SRB_CSRB",		"R: Status Reg B\nW:Clk Sel Reg B");
+		duart.add(WordDataType.dataType, 2, "1XTEST_CRB",	"R: 1x/16x Test\nW: Cmd Reg B");
+		duart.add(WordDataType.dataType, 2, "RHRB_THRB",	"R: Rx Buf B\nW:Tx Buf B");
+		duart.add(WordDataType.dataType, 2, "IVR",			"R/W: Interrupt vector register");
+		duart.add(WordDataType.dataType, 2, "INP_OPCR",		"R: Input ports IP0-IP6\nW: Output Port Config Register");
+		duart.add(WordDataType.dataType, 2, "START_OBS",	"R: Start Counter command\nW: Set Output Port Bits Command");
+		duart.add(WordDataType.dataType, 2, "STOP_OBR",		"R: Stop Counter command\nW: Reset Output Port Bits Command");
+		try {
+			DataUtilities.createData(program, fpa.toAddr(0x240300), duart, -1, false,
+					ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+			program.getSymbolTable().createLabel(fpa.toAddr(0x240300), "IO_DUART", SourceType.IMPORTED);
+		} catch (CodeUnitInsertionException | InvalidInputException e) {
+			log.appendException(e);
+		}
 
+
+		createSegment(fpa, null, "IO_UNK_04",	0x240400, 256, true, true, false, true, log);
+
+		createSegment(fpa, null, "IO_UNK_05",	0x240500, 256, true, true, false, true, log);
+
+		createSegment(fpa, null, "IO_UNK_06",	0x240600, 256, true, true, false, true, log);
+
+		createSegment(fpa, null, "IO_UNK_07",	0x240700, 256, true, true, false, true, log);
+
+		createSegment(fpa, null, "IO_UNK_08",	0x240800, 256, true, true, false, true, log);
+
+		//createSegment(fpa, null, "IO_UNDEFINED",0x240900, 0x250000-0x240900, true, true, false, true, log);		// Undefined, no peripherals assigned
+
+		/*
 		if (OptionDialog.YES_OPTION == OptionDialog.showYesNoDialogWithNoAsDefaultButton(null, "Question",
 				"Create Sega CD segment?")) {
 			if (romStream.available() > 0x3FFFFFL) {
@@ -168,30 +315,44 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 
 		createSegment(fpa, null, "RAM", 0xFF0000L, 0x10000L, true, true, true, false, log);
 		createMirrorSegment(program.getMemory(), fpa, "RAM", 0xFF0000L, 0xFFFF0000L, 0x10000L, log);
+		*/
 	}
 
-	private void markVectorsTable(Program program, FlatProgramAPI fpa, MessageLog log) {
+	/**
+	 * Mark the M68000 vector table
+	 * 
+	 * @param program
+	 * @param fpa
+	 * @param log
+	 */
+	private void markVectorTable(Program program, FlatProgramAPI fpa, MessageLog log) {
 		try {
+			// Declare the vector table as data
 			DataUtilities.createData(program, fpa.toAddr(0), vectors.toDataType(), -1, false,
 					ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
 
+			// Define the vectors as functions (if possible) and mark them as execution entry points
 			for (VectorFunc func : vectors.getVectors()) {
 				fpa.createFunction(func.getAddress(), func.getName());
+				fpa.addEntryPoint(func.getAddress());
 			}
 		} catch (CodeUnitInsertionException e) {
 			log.appendException(e);
 		}
 	}
-
-	private void markHeader(Program program, FlatProgramAPI fpa, MessageLog log) {
-		try {
-			DataUtilities.createData(program, fpa.toAddr(0x100), header.toDataType(), -1, false,
-					ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
-		} catch (CodeUnitInsertionException e) {
-			log.appendException(e);
-		}
-	}
 	
+
+	/**
+	 * Declare an array of data elements (bytes, words or dwords) and assign it a label.
+	 * 
+	 * @param fpa
+	 * @param program
+	 * @param address
+	 * @param name
+	 * @param numElements
+	 * @param type
+	 * @param log
+	 */
 	private void createNamedArray(FlatProgramAPI fpa, Program program, long address, String name, int numElements, DataType type, MessageLog log) {
 		try {
 			CreateArrayCmd arrayCmd = new CreateArrayCmd(fpa.toAddr(address), numElements, type, type.getLength());
@@ -202,6 +363,16 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 		}
 	}
 
+	/**
+	 * Set the type of a data byte, word or DWord, and add it to the symbol table.
+	 * 
+	 * @param fpa
+	 * @param program
+	 * @param address
+	 * @param name
+	 * @param type
+	 * @param log
+	 */
 	private void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, DataType type, MessageLog log) {
 		try {
 			if (type.equals(ByteDataType.dataType)) {
@@ -217,6 +388,36 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 		}
 	}
 
+	private void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, String comment, DataType type, MessageLog log) {
+		try {
+			if (type.equals(ByteDataType.dataType)) {
+				fpa.createByte(fpa.toAddr(address));
+			} else if (type.equals(WordDataType.dataType)) {
+				fpa.createWord(fpa.toAddr(address));
+			} else if (type.equals(DWordDataType.dataType)) {
+				fpa.createDWord(fpa.toAddr(address));
+			}
+			program.getSymbolTable().createLabel(fpa.toAddr(address), name, SourceType.IMPORTED);
+			fpa.setEOLComment(fpa.toAddr(address), comment);
+		} catch (Exception e) {
+			log.appendException(e);
+		}
+	}
+
+	/**
+	 * Create a new segment with data from the input stream
+	 * 
+	 * @param fpa
+	 * @param stream
+	 * @param name
+	 * @param address
+	 * @param size
+	 * @param read
+	 * @param write
+	 * @param execute
+	 * @param volatil
+	 * @param log
+	 */
 	private void createSegment(FlatProgramAPI fpa, InputStream stream, String name, long address, long size,
 			boolean read, boolean write, boolean execute, boolean volatil, MessageLog log) {
 		MemoryBlock block = null;
@@ -231,6 +432,17 @@ public class SegaLoader extends AbstractLibrarySupportLoader {
 		}
 	}
 
+	/**
+	 * Create a segment which mirrors data in another address (e.g. IDATA)
+	 * 
+	 * @param memory
+	 * @param fpa
+	 * @param name
+	 * @param base
+	 * @param new_addr
+	 * @param size
+	 * @param log
+	 */
 	private void createMirrorSegment(Memory memory, FlatProgramAPI fpa, String name, long base, long new_addr,
 			long size, MessageLog log) {
 		MemoryBlock block = null;

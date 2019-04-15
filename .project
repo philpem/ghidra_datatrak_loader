@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>Sega</name>
+	<name>Datatrak</name>
 	<comment></comment>
 	<projects>
 	</projects>
@@ -24,7 +24,7 @@
 		<link>
 			<name>Ghidra</name>
 			<type>2</type>
-			<location>D:/ghidra_9.0.2</location>
+			<location>/home/philpem/APPS/ghidra_9.0.2</location>
 		</link>
 	</linkedResources>
 </projectDescription>

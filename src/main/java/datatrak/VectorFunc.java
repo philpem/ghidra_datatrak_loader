@@ -1,4 +1,4 @@
-package sega;
+package datatrak;
 
 import ghidra.program.model.address.Address;
 

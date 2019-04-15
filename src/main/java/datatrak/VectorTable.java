@@ -1,4 +1,4 @@
-package sega;
+package datatrak;
 
 import java.io.IOException;
 
@@ -9,24 +9,27 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 
-public class VectorsTable implements StructConverter {
-	private static final int VECTORS_SIZE = 0x100;
+public class VectorTable implements StructConverter {
+	// Size of the vector block
+	private static final int VECTORS_SIZE = 0x400;
+	// Number of vectors
 	private static final int VECTORS_COUNT = VECTORS_SIZE / 4;
 	
+	// The first 64 defined vectors
 	private static final String[] VECTOR_NAMES = {
 			"SSP", "Reset", "BusErr", "AdrErr", "InvOpCode", "DivBy0", "Check", "TrapV", "GPF", "Trace",
-			"Reserv0", "Reserv1", "Reserv2", "Reserv3", "Reserv4", "BadInt", "Reserv10", "Reserv11",
-			"Reserv12", "Reserv13", "Reserv14", "Reserv15", "Reserv16", "Reserv17", "BadIRQ", "IRQ1",
-			"EXT", "IRQ3", "HBLANK", "IRQ5", "VBLANK", "IRQ7", "Trap0", "Trap1", "Trap2", "Trap3", "Trap4",
+			"LineA", "LineF", "Reserv12", "Reserv13", "Reserv14", "UninitIRQ", "Reserv16", "Reserv17",
+			"Reserv18", "Reserv19", "Reserv20", "Reserv21", "Reserv22", "Reserv23", "SpuriousInt", "IRQ1",
+			"IRQ2", "IRQ3", "IRQ4", "IRQ5", "IRQ6", "IRQ7", "Trap0", "Trap1", "Trap2", "Trap3", "Trap4",
 			"Trap5", "Trap6", "Trap7", "Trap8", "Trap9", "Trap10", "Trap11", "Trap12", "Trap13","Trap14",
-			"Trap15", "Reserv30", "Reserv31", "Reserv32", "Reserv33", "Reserv34", "Reserv35", "Reserv36",
-			"Reserv37", "Reserv38", "Reserv39", "Reserv3A", "Reserv3B", "Reserv3C", "Reserv3D", "Reserv3E",
-			"Reserv3F"
+			"Trap15", "Reserv48", "Reserv49", "Reserv50", "Reserv51", "Reserv52", "Reserv53", "Reserv54",
+			"Reserv55", "Reserv56", "Reserv57", "Reserv58", "Reserv59", "Reserv60", "Reserv61", "Reserv62",
+			"Reserv63"
 	};
 	
 	private VectorFunc[] vectors;
 	
-	public VectorsTable(FlatProgramAPI fpa, BinaryReader reader) throws IOException {
+	public VectorTable(FlatProgramAPI fpa, BinaryReader reader) throws IOException {
 		if (reader.length() < VECTORS_SIZE) {
 			return;
 		}
@@ -35,16 +38,26 @@ public class VectorsTable implements StructConverter {
 		vectors = new VectorFunc[VECTORS_COUNT];
 		
 		for (int i = 0; i < VECTORS_COUNT; ++i) {
-			vectors[i] = new VectorFunc(fpa.toAddr(reader.readNextUnsignedInt()), VECTOR_NAMES[i]);
+			if (i < VECTOR_NAMES.length) {
+				// CPU-defined vectors
+				vectors[i] = new VectorFunc(fpa.toAddr(reader.readNextUnsignedInt()), VECTOR_NAMES[i]);
+			} else {
+				// User vectors
+				vectors[i] = new VectorFunc(fpa.toAddr(reader.readNextUnsignedInt()), String.format("User%d", i));
+			}
 		}
 	}
 	
 	@Override
 	public DataType toDataType() {
-		Structure s = new StructureDataType("VectorsTable", 0);
+		Structure s = new StructureDataType("VectorTable", 0);
 		
 		for (int i = 0; i < VECTORS_COUNT; ++i) {
-			s.add(POINTER, 4, VECTOR_NAMES[i], null);
+			if (i < VECTOR_NAMES.length) {
+				s.add(POINTER, 4, VECTOR_NAMES[i], null);
+			} else {
+				s.add(POINTER, 4, String.format("User%d", i), null);
+			}
 		}
 		
 		return s;
