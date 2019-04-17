@@ -1,33 +1,12 @@
-/* ###
- * IP: GHIDRA
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- * 
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-package datatrak;
+package quantelpaintbox;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.*;
 
-import docking.widgets.OptionDialog;
 import ghidra.app.cmd.data.CreateArrayCmd;
-import ghidra.app.util.Option;
-import ghidra.app.util.bin.BinaryReader;
 import ghidra.app.util.bin.ByteProvider;
-import ghidra.app.util.importer.MemoryConflictHandler;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
-import ghidra.app.util.opinion.LoadSpec;
 import ghidra.framework.store.LockException;
 import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
@@ -36,151 +15,131 @@ import ghidra.program.model.data.ByteDataType;
 import ghidra.program.model.data.DWordDataType;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataUtilities;
-import ghidra.program.model.data.DataUtilities.ClearDataMode;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
+import ghidra.program.model.data.Undefined1DataType;
 import ghidra.program.model.data.WordDataType;
-import ghidra.program.model.lang.LanguageCompilerSpecPair;
+import ghidra.program.model.data.DataUtilities.ClearDataMode;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.mem.MemoryConflictException;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.util.CodeUnitInsertionException;
-import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
-/**
- * TODO: Provide class-level documentation that describes what this loader does.
- */
-public class DatatrakLoader extends AbstractLibrarySupportLoader {
+public abstract class AbstractPaintboxLoader extends AbstractLibrarySupportLoader {
 
-	private VectorTable vectors;
+	protected VectorTable vectors;
 
-	@Override
-	public String getName() {
-		return "Datatrak M68000 firmware";
-	}
-
-	@Override
-	public Collection<LoadSpec> findSupportedLoadSpecs(ByteProvider provider) throws IOException {
-		List<LoadSpec> loadSpecs = new ArrayList<>();
+	protected void createPaintboxHardwareSegments(FlatProgramAPI fpa, ByteProvider provider, Program program, TaskMonitor monitor,
+			MessageLog log) {
+		
+		// FIXME unknown
+		createSegment(fpa, null, "XXX_UNK_020000", 0x020000, 0x20000, true, true, true, true, log);
 		
 		
-		// FIXME Disabled because the Datatrak ROMs don't have any fixed data we can use to identify them
-		
-		//BinaryReader reader = new BinaryReader(provider, false);
-
-		//if (reader.readAsciiString(0x100, 4).equals(new String("SEGA"))) {
-			loadSpecs.add(new LoadSpec(this, 0, new LanguageCompilerSpecPair("68000:BE:32:MC68020", "default"), true));
-		//}
-
-		return loadSpecs;
-	}
-
-	@Override
-	protected void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options, Program program,
-			MemoryConflictHandler handler, TaskMonitor monitor, MessageLog log) throws CancelledException, IOException {
-
-		monitor.setMessage(String.format("%s : Start loading", getName()));
-
-		BinaryReader reader = new BinaryReader(provider, false);
-		FlatProgramAPI fpa = new FlatProgramAPI(program, monitor);
-
-		vectors = new VectorTable(fpa, reader);
-		//header = new GameHeader(reader);
-
-		createSegments(fpa, provider, program, monitor, log);
-		markVectorTable(program, fpa, log);
-		//markHeader(program, fpa, log);
+		// NVRAM
+		createSegment(fpa, null, "NVRAM", 0x040000, 0x1000, true, true, true, false, log);
+		// TODO: mirror segments
 
 		
-		// TODO: Find the Initialized Data block and set it up as a mirror segment
-		// TODO Scan from the RESET entry point to find the CRT0 (initialisation) code 
+		// FIXME unknown
+		createSegment(fpa, null, "XXX_UNK_060000", 0x060000, 0x20000, true, true, true, true, log);
+		
+		
+		
+		// -- RAM --
+		// 0x080000 - unconditional bus error
+		createSegment(fpa, null, "XXX_BUSERR_080000", 0x080000, 0x020000, true, true, true, true, log);
+		// 0x100000 - Main RAM -- 32 off MB81400 = 16MiB
+		createSegment(fpa, null, "RAM", 0x100000, 0xDE0000, true, true, true, false, log);
+		// 0x080000 - unconditional bus error
+		createSegment(fpa, null, "XXX_BUSERR_EE0000", 0xEE0000, 0x020000, true, true, true, true, log);
 
-		long initPC = vectors.getReset().getAddress().getOffset();
 		
-		// Pattern to match; -1 means the byte is not requ
-		int[] pattern = {
-				0x41, 0xF9, 0x00, 0x20, 0x00, 0x00,		// LEA    (0x200000).L, A0     ; start of dseg in RAM
-				0x20, 0x3C, 0x00, -1, -1, -1,			// MOVE.L #EndOfDataSeg, D0    ; end of dseg in RAM
-				0x90, 0x88,								// SUB.L  A0, D0               ; D0 = D0 - A0
-				0x43, 0xF9, 0x00, -1, -1, -1,			// LEA    (StartOfData), A1    ; start of dseg initialisation data
-				0x53, 0x80,								// SUBQ.L #1, D0               ; D0 --
-				0x10, 0xD9,								// MOVE.B (A1)+, (A0)+         ; *a0++ = *a1++
-				0x51, 0xC8, 0xFF, 0xFC					// DBF    D0, $-2              ; decrement d0, branch if >= 0
-		};
 		
-		// Sliding window buffer -- TODO prefill with data from initPC
-		ArrayList<Integer> window = new ArrayList<>();
-		for (int i=0; i<pattern.length; i++) {		// FIXME prefills with zeroes
-			window.add(0);
+		// -- Peripherals --
+		
+		// Unknown
+		createSegment(fpa, null, "IO_UNK_F00000",	0xF00000, 0x10000,	true, true, false, true, log);
+		
+		// 68681 Dual UART -
+		//   Only the n+1 addresses are used, and only in byte access mode.
+		//   This is because the UART is tied to the lower address bus, and 68000 words are big-endian.
+		//   To write to the lower byte, we need to do a byte write to addr+1.
+		createSegment(fpa, null, "IO_DUART",		0xF10000, 32,		true, true, false, true, log);
+		Structure duart = new StructureDataType("DUART", 0);
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "MR1A_MR2A",	"R/W: Mode register A (MR1A, MR2A)");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "SRA_CSRA",		"R: Status Reg A\nW:Clk Sel Reg A");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "BRGT_CRA",		"R: BRG test\nW:Cmd Reg A");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "RHRA_THRA",	"R: Rx Buf A\nW:Tx Buf A");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "IPCR_ACR",		"R: Input port change reg\nW: Aux control reg");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "ISR_IMR",		"R: Interrupt status reg\nW: Interrupt mask reg");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "CTU_CTUR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "CTL_CTLR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "MR1B_MR2B",	"R/W: Mode Register B (MR1B, MR2B)");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "SRB_CSRB",		"R: Status Reg B\nW:Clk Sel Reg B");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "1XTEST_CRB",	"R: 1x/16x Test\nW: Cmd Reg B");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "RHRB_THRB",	"R: Rx Buf B\nW:Tx Buf B");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "IVR",			"R/W: Interrupt vector register");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "INP_OPCR",		"R: Input ports IP0-IP6\nW: Output Port Config Register");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "START_OBS",	"R: Start Counter command\nW: Set Output Port Bits Command");
+		duart.add(Undefined1DataType.dataType, 1);
+		duart.add(ByteDataType.dataType, 1, "STOP_OBR",		"R: Stop Counter command\nW: Reset Output Port Bits Command");
+		try {
+			DataUtilities.createData(program, fpa.toAddr(0xF10000), duart, -1, false,
+					ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+			program.getSymbolTable().createLabel(fpa.toAddr(0xF10000), "IO_DUART", SourceType.IMPORTED);
+		} catch (CodeUnitInsertionException | InvalidInputException e) {
+			log.appendException(e);
 		}
-		//reader.readByteArray(initPC, pattern.length);
 
-		Boolean match = true;
-		long matchAddress = 0;
+		// Diagnostic LED display
+		createSegment(fpa, null, "IO_LED",		0xF100F1, 1, true, true, false, true, log);
+		createNamedData(fpa, program, 0xF100F1L, "IO_LED_LED", ByteDataType.dataType, log);
+		fpa.setEOLComment( fpa.toAddr(0xF100F1L), "Diagnostic LED");
 
-		log.appendMsg(String.format("SLIDE: Initial PC = %08X",  initPC));
+		// MC68901 MFP
+		createSegment(fpa, null, "IO_MC68901_MFP",	0xF20000, 0x30, true, true, false, true, log);
 		
-		// Scan from the initial PC to a reasonable spot past it 
-		for (long addr=initPC; addr < initPC + 0x100; addr++) {
-			// Remove first byte (this is a sliding-window FIFO)
-			window.remove(0);
-			window.add((reader.readByte(addr)) & 0xFF);
+		// MC68450 DMA controller
+		createSegment(fpa, null, "IO_MC68450_DMA",	0xF30000, 0x100, true, true, false, true, log);
+		
+		// WD93C33A SCSI controller
+		createSegment(fpa, null, "IO_WD93C33A_SCSI",0xF40000, 0x20, true, true, false, true, log);
+	
+		
+		/// FIXME big ol' unknown
+		
+		
+		// Rotary switches 
+		createSegment(fpa, null, "IO_SWITCHES",		0xFA0000, 0x10000, true, true, false, true, log);
+		createNamedData(fpa, program, 0xFA0000L, "IO_ROTARY_SWITCHES", "Rotary switches -- 0x0jkl (", WordDataType.dataType, log);
+		
+		/// FIXME more unknowns
 
-			// Check for a window match
-			match = true;
-			for (int i=0; i<pattern.length; i++) {
-				if ((pattern[i] != -1) && (pattern[i] != window.get(i))) {
-					match = false;
-					break;
-				}
-			}
-			
-			// Exit the loop if we found a match
-			if (match) {
-				matchAddress = addr - pattern.length + 1;
-				break;
-			}
-		}
+		// Security PAL
+		createSegment(fpa, null, "IO_SECURITY_PAL",	0xFD0000, 0x10000, true, true, false, true, log);
 		
-		if (match) {
-			// Extract useful pointers from the IDATA copy code
-			long dsegRamStart = reader.readUnsignedInt(matchAddress+2);
-			long dsegRamEnd   = reader.readUnsignedInt(matchAddress+8);
-			long dsegRomStart = reader.readUnsignedInt(matchAddress+16);
-			
-			log.appendMsg(String.format("%s: Creating IDATA segment -- RAM 0x%06X to 0x%06X, copied from 0x%06X", getName(), dsegRamStart, dsegRamEnd, dsegRomStart));
-			
-			// Calculate IDATA segment length and ROM end address
-			long dsegLen = dsegRamEnd - dsegRamStart;
-			//long dsegRomEnd = dsegRomStart + dsegLen;
-			
-			createMirrorSegment(program.getMemory(), fpa, "IDATA", dsegRomStart, dsegRamStart, dsegLen, log);
-			createSegment(fpa, null, "RAM1", dsegRamEnd, 0x20000-dsegLen, true, true, true, false, log);		// TODO Validate RAM area addresses
-			createSegment(fpa, null, "RAM2", 0x220000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
-		} else {
-			log.appendMsg("Caution: IDATA segment initialiser not found -- IDATA segment data not copied!");
-			createSegment(fpa, null, "RAM1", 0x200000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
-			createSegment(fpa, null, "RAM2", 0x220000, 0x20000, true, true, true, false, log);		// TODO Validate RAM area addresses
-		}
 		
-		monitor.setMessage(String.format("%s : Loading done", getName()));
-	}
-
-	private void createSegments(FlatProgramAPI fpa, ByteProvider provider, Program program, TaskMonitor monitor,
-			MessageLog log) throws IOException {
-		InputStream romStream = provider.getInputStream(0);
-
-		// ROM
-		createSegment(fpa, romStream, "ROM", 0x000000L, Math.min(romStream.available(), 0x1FFFFFL),
-				true, false, true, false, log);
-				
-		
-		// RAM segments are created once IDATA is known
-		
+		/*
 		
 		// Peripherals
 		createSegment(fpa, null, "IO_ADC",		0x240000, 256, true, true, false, true, log);	// ZN448 A-D converter
@@ -208,31 +167,6 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 			fpa.setEOLComment( fpa.toAddr(0x240201L), "Read: RF phase low nibble");
 		}
 		
-		createSegment(fpa, null, "IO_DUART",	0x240300, 256, true, true, false, true, log);	// SCC68692 Dual UART
-		Structure duart = new StructureDataType("DUART", 0);
-		duart.add(WordDataType.dataType, 2, "MR1A_MR2A",	"R/W: Mode register A (MR1A, MR2A)");
-		duart.add(WordDataType.dataType, 2, "SRA_CSRA",		"R: Status Reg A\nW:Clk Sel Reg A");
-		duart.add(WordDataType.dataType, 2, "BRGT_CRA",		"R: BRG test\nW:Cmd Reg A");
-		duart.add(WordDataType.dataType, 2, "RHRA_THRA",	"R: Rx Buf A\nW:Tx Buf A");
-		duart.add(WordDataType.dataType, 2, "IPCR_ACR",		"R: Input port change reg\nW: Aux control reg");
-		duart.add(WordDataType.dataType, 2, "ISR_IMR",		"R: Interrupt status reg\nW: Interrupt mask reg");
-		duart.add(WordDataType.dataType, 2, "CTU_CTUR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
-		duart.add(WordDataType.dataType, 2, "CTL_CTLR",		"R: MSB of counter in counter mode\nW:C/T upper preset value");
-		duart.add(WordDataType.dataType, 2, "MR1B_MR2B",	"R/W: Mode Register B (MR1B, MR2B)");
-		duart.add(WordDataType.dataType, 2, "SRB_CSRB",		"R: Status Reg B\nW:Clk Sel Reg B");
-		duart.add(WordDataType.dataType, 2, "1XTEST_CRB",	"R: 1x/16x Test\nW: Cmd Reg B");
-		duart.add(WordDataType.dataType, 2, "RHRB_THRB",	"R: Rx Buf B\nW:Tx Buf B");
-		duart.add(WordDataType.dataType, 2, "IVR",			"R/W: Interrupt vector register");
-		duart.add(WordDataType.dataType, 2, "INP_OPCR",		"R: Input ports IP0-IP6\nW: Output Port Config Register");
-		duart.add(WordDataType.dataType, 2, "START_OBS",	"R: Start Counter command\nW: Set Output Port Bits Command");
-		duart.add(WordDataType.dataType, 2, "STOP_OBR",		"R: Stop Counter command\nW: Reset Output Port Bits Command");
-		try {
-			DataUtilities.createData(program, fpa.toAddr(0x240300), duart, -1, false,
-					ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
-			program.getSymbolTable().createLabel(fpa.toAddr(0x240300), "IO_DUART", SourceType.IMPORTED);
-		} catch (CodeUnitInsertionException | InvalidInputException e) {
-			log.appendException(e);
-		}
 
 
 		createSegment(fpa, null, "IO_UNK_04",	0x240400, 256, true, true, false, true, log);
@@ -246,6 +180,9 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 		createSegment(fpa, null, "IO_UNK_08",	0x240800, 256, true, true, false, true, log);
 
 		//createSegment(fpa, null, "IO_UNDEFINED",0x240900, 0x250000-0x240900, true, true, false, true, log);		// Undefined, no peripherals assigned
+
+		*/
+
 
 		/*
 		if (OptionDialog.YES_OPTION == OptionDialog.showYesNoDialogWithNoAsDefaultButton(null, "Question",
@@ -325,7 +262,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 	 * @param fpa
 	 * @param log
 	 */
-	private void markVectorTable(Program program, FlatProgramAPI fpa, MessageLog log) {
+	protected void markVectorTable(Program program, FlatProgramAPI fpa, MessageLog log) {
 		try {
 			// Declare the vector table as data
 			DataUtilities.createData(program, fpa.toAddr(0), vectors.toDataType(), -1, false,
@@ -353,7 +290,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 	 * @param type
 	 * @param log
 	 */
-	private void createNamedArray(FlatProgramAPI fpa, Program program, long address, String name, int numElements, DataType type, MessageLog log) {
+	protected void createNamedArray(FlatProgramAPI fpa, Program program, long address, String name, int numElements, DataType type, MessageLog log) {
 		try {
 			CreateArrayCmd arrayCmd = new CreateArrayCmd(fpa.toAddr(address), numElements, type, type.getLength());
 			arrayCmd.applyTo(program);
@@ -373,7 +310,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 	 * @param type
 	 * @param log
 	 */
-	private void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, DataType type, MessageLog log) {
+	protected void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, DataType type, MessageLog log) {
 		try {
 			if (type.equals(ByteDataType.dataType)) {
 				fpa.createByte(fpa.toAddr(address));
@@ -388,7 +325,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 		}
 	}
 
-	private void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, String comment, DataType type, MessageLog log) {
+	protected void createNamedData(FlatProgramAPI fpa, Program program, long address, String name, String comment, DataType type, MessageLog log) {
 		try {
 			if (type.equals(ByteDataType.dataType)) {
 				fpa.createByte(fpa.toAddr(address));
@@ -418,7 +355,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 	 * @param volatil
 	 * @param log
 	 */
-	private void createSegment(FlatProgramAPI fpa, InputStream stream, String name, long address, long size,
+	protected void createSegment(FlatProgramAPI fpa, InputStream stream, String name, long address, long size,
 			boolean read, boolean write, boolean execute, boolean volatil, MessageLog log) {
 		MemoryBlock block = null;
 		try {
@@ -443,7 +380,7 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 	 * @param size
 	 * @param log
 	 */
-	private void createMirrorSegment(Memory memory, FlatProgramAPI fpa, String name, long base, long new_addr,
+	protected void createMirrorSegment(Memory memory, FlatProgramAPI fpa, String name, long base, long new_addr,
 			long size, MessageLog log) {
 		MemoryBlock block = null;
 		Address baseAddress = fpa.toAddr(base);
@@ -459,4 +396,5 @@ public class DatatrakLoader extends AbstractLibrarySupportLoader {
 			log.appendException(e);
 		}
 	}
+
 }

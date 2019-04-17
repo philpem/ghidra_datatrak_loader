@@ -1,4 +1,4 @@
-package datatrak;
+package quantelpaintbox;
 
 import ghidra.program.model.address.Address;
 
