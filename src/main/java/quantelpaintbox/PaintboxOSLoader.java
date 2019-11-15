@@ -87,7 +87,6 @@ public class PaintboxOSLoader extends AbstractPaintboxLoader {
 
 		monitor.setMessage(String.format("%s : Start loading", getName()));
 
-		BinaryReader reader = new BinaryReader(provider, false);
 		FlatProgramAPI fpa = new FlatProgramAPI(program, monitor);
 
 		// We don't set up vectors because the OS is loaded into RAM and the IVT is in ROM
@@ -103,44 +102,16 @@ public class PaintboxOSLoader extends AbstractPaintboxLoader {
 		
 		// Search for symbols
 		monitor.setMessage(String.format("%s : Scanning for symbols", getName()));
-			
-		// Find the symbol tables -- TODO this only finds one symbol table, we want all of them
-		// Another begins at 0x3A6336 with "p_re_parse"
-		Address a = fpa.findBytes(null, "FINDMESS");
-		if (a != null) {
-			log.appendMsg(String.format("Symbol table found at addr: %08X", a.getOffset()));
-			log.appendMsg(String.format("Symbol table 2 found at addr: %08X", fpa.findBytes(null, "p_re_parse").getOffset()));
-	
-			// Symbol table format is <4bytes addr><4bytes length?><ASCIIZ name><optional padding to word boundary>
-
-			// Backtrack to the address field
-			reader.setPointerIndex(a.getOffset() - OS_LOAD_ADDRESS - 8);
-			
-			do {
-				long addr = reader.readNextUnsignedInt();
-				if (addr == 0) {
-					// An address of zero signals the end of the table
-					break;
-				}
-				long len  = reader.readNextUnsignedInt();
-				String symbol = reader.readNextAsciiString();
-				
-				// Skip the padding if we're not lined up on a word boundary
-				reader.align(2);
-				
-				// Create a function at the discovered address and mark its entry point
-				try {
-					log.appendMsg(String.format("Symbol %s -> 0x%06X len %d (0x%X)", symbol, addr, len, len));
-					//fpa.createLabel(fpa.toAddr(addr), symbol, true);
-					fpa.createFunction(fpa.toAddr(addr), symbol);
-					fpa.addEntryPoint(fpa.toAddr(addr));
-				} catch (Exception e) {
-					log.appendException(e);
-				}
-			} while (true);
-		} else {
-			log.appendMsg("Sorry - couldn't find the symbol table.");
+		
+		extractSymbols(provider, fpa, OS_LOAD_ADDRESS, log);
+		
+		// Declare the initial entry point
+		try {
+			fpa.createLabel(fpa.toAddr(OS_LOAD_ADDRESS), "OSEntryPoint", true);
+		} catch (Exception e) {
+			log.appendException(e);
 		}
+		fpa.addEntryPoint(fpa.toAddr(OS_LOAD_ADDRESS));
 		
 		monitor.setMessage(String.format("%s : Loading done", getName()));
 	}

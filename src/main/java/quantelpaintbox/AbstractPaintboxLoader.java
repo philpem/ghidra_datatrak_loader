@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.InputStream;
 
 import ghidra.app.cmd.data.CreateArrayCmd;
+import ghidra.app.util.bin.BinaryReader;
 import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
@@ -37,33 +38,34 @@ public abstract class AbstractPaintboxLoader extends AbstractLibrarySupportLoade
 			MessageLog log) {
 		
 		// FIXME unknown
-		createSegment(fpa, null, "XXX_UNK_020000", 0x020000, 0x20000, true, true, true, true, log);
+		//createSegment(fpa, null, "XXX_UNK_020000", 0x020000, 0x20000, true, true, true, true, log);
 		
 		
 		// NVRAM
 		createSegment(fpa, null, "NVRAM", 0x040000, 0x1000, true, true, true, false, log);
+		createNamedArray(fpa, program, 0x040000, "NVRAM", 0x1000, ByteDataType.dataType, log);
 		// TODO: mirror segments
 
 		
 		// FIXME unknown
-		createSegment(fpa, null, "XXX_UNK_060000", 0x060000, 0x20000, true, true, true, true, log);
+		//createSegment(fpa, null, "XXX_UNK_060000", 0x060000, 0x20000, true, true, true, true, log);
 		
 		
 		
 		// -- RAM --
 		// 0x080000 - unconditional bus error
-		createSegment(fpa, null, "XXX_BUSERR_080000", 0x080000, 0x020000, true, true, true, true, log);
+		//createSegment(fpa, null, "XXX_BUSERR_080000", 0x080000, 0x020000, true, true, true, true, log);
 		// 0x100000 - Main RAM -- 32 off MB81400 = 16MiB
 		createSegment(fpa, null, "RAM", 0x100000, 0xDE0000, true, true, true, false, log);
 		// 0x080000 - unconditional bus error
-		createSegment(fpa, null, "XXX_BUSERR_EE0000", 0xEE0000, 0x020000, true, true, true, true, log);
+		//createSegment(fpa, null, "XXX_BUSERR_EE0000", 0xEE0000, 0x020000, true, true, true, true, log);
 
 		
 		
 		// -- Peripherals --
 		
 		// Unknown
-		createSegment(fpa, null, "IO_UNK_F00000",	0xF00000, 0x10000,	true, true, false, true, log);
+		//createSegment(fpa, null, "IO_UNK_F00000",	0xF00000, 0x10000,	true, true, false, true, log);
 		
 		// 68681 Dual UART -
 		//   Only the n+1 addresses are used, and only in byte access mode.
@@ -118,12 +120,15 @@ public abstract class AbstractPaintboxLoader extends AbstractLibrarySupportLoade
 
 		// MC68901 MFP
 		createSegment(fpa, null, "IO_MC68901_MFP",	0xF20000, 0x30, true, true, false, true, log);
+		// TODO registers
 		
 		// MC68450 DMA controller
 		createSegment(fpa, null, "IO_MC68450_DMA",	0xF30000, 0x100, true, true, false, true, log);
+		// TODO registers
 		
-		// WD93C33A SCSI controller
-		createSegment(fpa, null, "IO_WD93C33A_SCSI",0xF40000, 0x20, true, true, false, true, log);
+		// WD33C93 SCSI controller
+		createSegment(fpa, null, "IO_WD33C93A_SCSI",0xF40000, 0x20, true, true, false, true, log);
+		// TODO registers
 	
 		
 		/// FIXME big ol' unknown
@@ -131,12 +136,12 @@ public abstract class AbstractPaintboxLoader extends AbstractLibrarySupportLoade
 		
 		// Rotary switches 
 		createSegment(fpa, null, "IO_SWITCHES",		0xFA0000, 0x10000, true, true, false, true, log);
-		createNamedData(fpa, program, 0xFA0000L, "IO_ROTARY_SWITCHES", "Rotary switches -- 0x0jkl (", WordDataType.dataType, log);
+		createNamedData(fpa, program, 0xFA0000L, "IO_ROTARY_SWITCHES", "Rotary switches -- 0x0jkl", WordDataType.dataType, log);
 		
-		/// FIXME more unknowns
-
 		// Security PAL
 		createSegment(fpa, null, "IO_SECURITY_PAL",	0xFD0000, 0x10000, true, true, false, true, log);
+		createNamedArray(fpa, program, 0xFD0000L, "SECURITY_PAL", 0x10000, ByteDataType.dataType, log);
+		fpa.setEOLComment(  fpa.toAddr(0xFD0000L), "Read:  Security PAL");
 		
 		
 		/*
@@ -397,4 +402,92 @@ public abstract class AbstractPaintboxLoader extends AbstractLibrarySupportLoade
 		}
 	}
 
+	
+	private Boolean isValidSymbolName(String s) {
+		final String VALID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_.";
+		final String NUMBERS = "0123456789";
+		
+		for (char ch : s.toCharArray()) {
+			// If the string contains an invalid character, abort
+			if (VALID_CHARS.indexOf(ch) == -1) {
+				return false;
+			}			
+		}
+		
+		// Make sure the first character is not a number
+		if (NUMBERS.indexOf(s.charAt(0)) != -1) {
+			return false;
+		}
+		
+		return true;
+	}
+
+	/**
+	 * Extract symbol tables from the image
+	 * 
+	 * @param provider
+	 * @param fpa
+	 * @param baseAddr
+	 * @param log
+	 */
+	protected void extractSymbols(ByteProvider provider, FlatProgramAPI fpa, long baseAddr, MessageLog log) {
+	
+		final int MAX_SYMBOL_LEN = 64;
+		
+		BinaryReader reader = new BinaryReader(provider, false);
+		
+		// Scan for symbols
+		long len = 0;
+		try {
+			len = reader.length();
+		} catch (IOException e) {
+			log.appendException(e);
+			return;
+		}
+		
+		while (reader.getPointerIndex() < len) {
+			try {
+				// Save current address
+				long ptr = reader.getPointerIndex();
+				
+				// Try to read a symbol block
+				long symaddr = reader.readNextUnsignedInt();
+				long symlen  = reader.readNextUnsignedInt();
+				String symname = reader.readNextNullTerminatedAsciiString();
+
+				// Disregard symbols which are blatantly too long
+				if (symname.length() > MAX_SYMBOL_LEN) {
+					continue;
+				}
+				
+				// See if the symbol name is reasonable
+				if ((symname.length() < 2) || !isValidSymbolName(symname)) {
+					// Nope. Seek back to the next word boundary and try again.
+					reader.setPointerIndex(ptr + 2);
+					continue;
+				}
+				
+				// See if the address is reasonable
+				if ((symaddr >= baseAddr) && (symaddr <= reader.length()) && (symlen > 0) && (symlen < 0xFFFF)) {
+					log.appendMsg(String.format("Symbol found: Addr %08X Sz %4s  -- '%s'", symaddr, symlen, symname));
+
+					try {
+						fpa.createLabel(fpa.toAddr(symaddr), symname, true);
+					} catch (Exception e) {
+						log.appendException(e);
+					}
+					fpa.createFunction(fpa.toAddr(symaddr), symname);
+					fpa.addEntryPoint(fpa.toAddr(symaddr));
+				}
+				
+				// Seek past any padding and onto the next word boundary
+				if ((reader.getPointerIndex() % 2) != 0) {
+					reader.readNextByte();
+				}
+			} catch (IOException e) {
+				break;
+			}
+		}
+	}
+	
 }

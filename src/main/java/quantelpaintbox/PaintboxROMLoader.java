@@ -99,6 +99,11 @@ public class PaintboxROMLoader extends AbstractPaintboxLoader {
 		//createMirrorSegment(program.getMemory(), fpa, "ROM___", 0x000000L, 0x018000L, 0x8000L, log);
 
 		
+		// Search for symbols
+		monitor.setMessage(String.format("%s : Scanning for symbols", getName()));
+		
+		extractSymbols(provider, fpa, 0L, log);
+		
 		createPaintboxHardwareSegments(fpa, provider, program, monitor, log);
 		markVectorTable(program, fpa, log);
 	
